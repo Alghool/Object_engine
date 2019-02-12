@@ -1,12 +1,6 @@
 <?php
 (defined('BASEPATH')) OR exit('No direct script access allowed');
-
-/**
- * Created by PhpStorm.
- * User: EMA_Alghool
- * Date: 1/26/2019
- * Time: 5:24 AM
- */
+include_once ('/Attr_types/Attr_engine.php');
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///                                               HELP                                                     //
@@ -15,7 +9,7 @@
 ///
 ///      'value' => null,
 ///      'type' => 'TIMESTAMP', 'INT', 'VARCHAR', 'TEXT', 'FLAG', 'ENUM'
-///      'constraint' => var length limit , int length limit, enum values, flag options
+///      'constraint' => var length limit , int Type(tiny, small, medium, int, big), enum values, flag options
 ///      'unsigned' => TRUE,FALSE fron int
 ///      'required' => TRUE, FALSE validate when save
 ///      'default' => '', default value for this attr
@@ -29,38 +23,12 @@
 
 class Object_engine{
     // settings /////////////////////
-    public $strict = false;
+    public $strict = true;
 
     protected static $CI ;
     protected $table;
     protected $id = 0;
-    protected $attr = array(
-        'title' =>
-            array(
-                'value' => null,
-                'type' => 'VARCHAR',
-                'constraint' => 250,
-                'required' => TRUE,
-                'default' => 'title'
-            ),
-        'body' =>
-            array(
-                'value' => null,
-                'type' => 'TEXT',
-                'required' => false,
-                'default' => ''
-            ),
-        'created_at' =>
-            array(
-                'value' => null,
-                'type' => 'TIMESTAMP'
-            ),
-        'modified_at' =>
-            array(
-                'value' => null,
-                'type' => 'TIMESTAMP'
-            )
-    );
+    protected $attr = array();
     protected $query = null;
 
     protected $errorMsg = '';
@@ -74,7 +42,14 @@ class Object_engine{
         if($modelName){
             $this->query = self::$CI->db;
             $this->modelName = $modelName;
-            $this->strict = false;
+            $this->attr['created_at'] = new Timestamp_attr(array(
+                'default' => date("Y-m-d H:i:s")
+            ));
+            $this->attr['modified_at'] = new Timestamp_attr(array(
+                'default' => date("Y-m-d H:i:s")
+            ));
+
+
         }
     }
 
@@ -98,40 +73,55 @@ class Object_engine{
         $result = $query->row_array();
         if($result){
             $this->buildResult($result);
+            $this->afterQuery();
             return true;
         }else{
             if($this->strict){
-                $this->errorMsg = "request non exist ID: {$ID} in module: {$this->modelName}";
+                $this->errorMsg = "no result found ID: {$ID} in module: {$this->modelName}";
                 log_message('debug', $this->errorMsg);
-                show_404();
+                show_error( $this->errorMsg, 404, $heading = 'object engine encountered error');
             }
             return false;
         }
     }
 
     public function save(){
+        //register the modified date
+        $this->attr['modified_at']->setValueWithoutValidation( date("Y-m-d H:i:s"));
+
+        //set object data
+        $data = array();
+        foreach ($this->attr as $attr => $value){
+            if($value->hasValue()){
+                $data[$attr] = $value->getValue();
+            }elseif($value->isRequired()){
+                $this->errorMsg = "required attribute {$attr} is missing module: {$this->modelName}";
+                log_message('debug', $this->errorMsg);
+                return false;
+            }elseif($value->hasDefault()){
+                $value->useDefault();
+                $data[$attr] = $value->getValue();
+            }elseif ($this->strict){
+                $this->errorMsg = " attribute {$attr} is missing in module: {$this->modelName} - strict mode";
+                log_message('debug', $this->errorMsg);
+                return false;
+            }
+        }
+
         if($this->hasObject && $this->id != 0){
             //update
-
+            $this->query->where($this->table.'_id', $this->id);
+            if($this->query->update($this->table, $data)){
+                $this->afterQuery();
+                return true;
+            }else{
+                return false;
+            };
         }else{
             //add new
-            $data = array();
-            foreach ($this->attr as $attr => $value){
-                echo "<pre>$attr</pre>";
-                var_dump($value);
-                if(isset($value['value'])){
-                    $data[$attr] = $value['value'];
-                }elseif(isset($value['required']) && $value['required']){
-                    $this->errorMsg = "required attribute {$attr} not exist in module: {$this->modelName}";
-                    log_message('debug', $this->errorMsg);
-                    return false;
-                }elseif(isset($value['default']) && $value['default']){
-                    $this->attr[$attr]['value'] = $value['default'];
-                    $data[$attr] = $value['default'];
-                }
-            }
             if($this->query->insert($this->table, $data)){
                 $this->id = $this->query->insert_id();
+                $this->afterQuery();
                 return true;
             }else{
                 return false;
@@ -143,8 +133,14 @@ class Object_engine{
         $this->id = $result[$this->table.'_id'];
         unset($result[$this->table.'_id']);
         foreach ($result as $attr => $value){
-            $this->attr[$attr]['value'] = $value;
+            if(isset($this->attr[$attr])){
+                $this->attr[$attr]->setValueWithoutValidation($value);
+            }
         }
+    }
+
+    private function afterQuery(){
+        $this->query->reset_query();
         $this->hasObject = true;
     }
 
@@ -167,28 +163,51 @@ class Object_engine{
         }
     }
 
-    public function __set($name, $value)
-    {
-        if(array_key_exists($name,$this->attr) && !is_array($value))
-        {
-            //todo: validate
-            switch($this->attr[$name]['type']){
-                case'INT':
-                    if(!is_numeric($value)){
-                        $this->errorMsg = "attribute {$name} value is not numeric : {$this->modelName}";
-                        log_message('debug', $this->errorMsg);
-                        return false;
-                    }
-                    if(strlen($value) > $this->attr[$name]['constraint']){
-                        $this->errorMsg = "required attribute {$name} length is not acceptable: {$this->modelName}";
-                        log_message('debug', $this->errorMsg);
-                        return false;
-                    }
-                    break;
+    public function setAttrs(array $attrs){
+        //todo: implement this to set multible attrs in the same time
+        $successCounter = 0;
+        foreach ($attrs as $key => $value){
+            if($this->setAttr($key, $value)){
+                $successCounter++;
             }
-            $this->attr[$name]['value'] = $value;
         }
+        if( $successCounter == count($attrs)){
+            return true;
+        }else{
+            $this->errorMsg = "not all values are set in module: {$this->modelName}";
+            log_message('debug', $this->errorMsg);
+            if($this->strict){
+                show_error( $this->errorMsg, 500, $heading = 'object engine encountered error');
+            }
+            return false;
+        }
+    }
 
+    public function setAttr($name, $value){
+        $done = true;
+        if($this->strict){
+            //do not allow non attribute inputs
+            if(!array_key_exists($name,$this->attr) && !((strpos ($name, 'or_') === 0 )&&(array_key_exists(substr($name,3),$this->attr)) )){
+                $this->errorMsg = "try to set non attribute property : {$name} in module: {$this->modelName}";
+                log_message('debug', $this->errorMsg);
+                show_error( $this->errorMsg, 500, $heading = 'object engine encountered error');
+                $done = false;
+            }
+        }
+        if( array_key_exists($name,$this->attr) && !is_array($value))
+        {
+            if($this->attr[$name]->setvalue($value)) {
+                $done = true;
+            }
+            else{
+                $this->errorMsg = "try to set non valid value '{$value}' for property : {$name} in module: {$this->modelName}";
+                log_message('debug', $this->errorMsg);
+                if($this->strict){
+                    show_error( $this->errorMsg, 500, $heading = 'object engine encountered error');
+                }
+                $done = false;
+            }
+        }
         if(!$this->hasObject){
             $where = 'where';
             if(strpos ($name, 'or_') === 0){
@@ -198,21 +217,28 @@ class Object_engine{
             if(is_array($value)){
                 $where = $where . '_in';
             }
-            $this->query->$where($name, $value);
+            if(array_key_exists($name,$this->attr)){
+                $this->query->$where($name, $value);
+            }
         }
+        return $done;
+    }
+
+    public function __set($name, $value)
+    {
+        $this->setAttr($name,$value);
     }
 
     public function __get($name)
     {
         if(array_key_exists($name, $this->attr)){
-            return $this->attr[$name]['value'];
+            return $this->attr[$name]->getValue();
         }elseif(isset($this->$name)){
             return $this->$name;
         }elseif($this->strict){
             $this->errorMsg = "request non exist attr: {$name} in module: {$this->modelName}";
-
             log_message('debug', $this->errorMsg);
-            show_404();
+            show_error( $this->errorMsg, 500, $heading = 'object engine encountered error');
         }else{
             return false;
         }
